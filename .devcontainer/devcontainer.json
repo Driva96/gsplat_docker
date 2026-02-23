@@ -1,0 +1,26 @@
+{
+  "name":"gsplat-dev",
+  "dockerComposeFile": ["./docker-compose.yml"],
+  "service": "gsplat",
+  "workspaceFolder": "/gsplat",
+  "remoteUser": "root",
+  "forwardPorts": [7777],
+  "shutdownAction": "stopCompose",
+  "runServices": ["gsplat"],
+  "hostRequirements": {
+    "gpu": "optional" 
+  },
+  "postCreateCommand": "/bin/sh -c nbstripout --install",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-toolsai.jupyter",
+        "ms-azuretools.vscode-docker"
+      ]
+    }
+  },
+  "containerEnv": {
+    "PYTHONUNBUFFERED": "1"
+  }
+}

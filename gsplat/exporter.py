@@ -548,6 +548,8 @@ def export_splats(
 
     if save_to:
         with open(save_to, "wb") as binary_file:
+            # print how much data is being written (in Gb)
+            print(f"Writing {len(data) / (1024 ** 3):.4f} Gb to {save_to}")
             binary_file.write(data)
 
     return data

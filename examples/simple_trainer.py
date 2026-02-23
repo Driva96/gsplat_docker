@@ -86,6 +86,7 @@ class Config:
     save_ply: bool = False
     # Steps to save the model as ply
     ply_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
+    ply_format: Literal["ply", "ply_compressed"] = "ply_compressed"
     # Whether to disable video generation during training and evaluation
     disable_video: bool = False
 
@@ -186,6 +187,23 @@ class Config:
 
     # Whether use fused-bilateral grid
     use_fused_bilagrid: bool = False
+
+    # Pruning bounds
+    """ # Min bounds (x, y, z)
+    scene_min: Optional[Tuple[float, float, float]] = None
+    # Max bounds (x, y, z)
+    scene_max: Optional[Tuple[float, float, float]] = None
+    # How often to check bounds (steps)
+    bounds_check_interval: int = 100 """
+
+    # Center of cylinder "x,y,z"
+    cylinder_center: Optional[str] = None
+    # Normal axis of cylinder "x,y,z" (The direction the cylinder points)
+    cylinder_axis: Optional[str] = None
+    # Radius of cylinder
+    cylinder_radius: Optional[float] = None
+    # Check bounds every N steps
+    bounds_check_interval: int = 100
 
     def adjust_steps(self, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
@@ -338,6 +356,85 @@ class Runner:
             normalize=cfg.normalize_world_space,
             test_every=cfg.test_every,
         )
+
+        # --------------------------------------------------------------------------
+        # Setup box pruning bounds if provided
+
+        """ self.prune_bounds_min = None
+        self.prune_bounds_max = None
+        
+        if cfg.scene_min is not None and cfg.scene_max is not None:
+            # On CPU
+            b_min = torch.tensor(cfg.scene_min).float()
+            b_max = torch.tensor(cfg.scene_max).float()
+            
+            # If the world was normalized, we must transform the user's bounds
+            # to match the internal coordinate system.
+            if cfg.normalize_world_space:
+
+                # Ensures on CPU
+                T = torch.from_numpy(self.parser.T).float()
+                s = self.parser.scale
+                print(f"Transforming bounds with T={T} and s={s}")
+                b_min = (b_min + T) * s
+                b_max = (b_max + T) * s
+
+            # Move to device
+            self.prune_bounds_min = b_min.to(self.device)
+            self.prune_bounds_max = b_max.to(self.device)
+            print(f"Pruning active. Bounds (internal): {self.prune_bounds_min} to {self.prune_bounds_max}") """
+        # --------------------------------------------------------------------------
+        # Setup cylinder pruning if provided
+        self.cyl_center = None
+        self.cyl_axis = None
+        self.cyl_radius = None
+
+        if cfg.cylinder_center is not None:
+            # Parse strings to tensors
+            c_vals = [float(x) for x in cfg.cylinder_center.split(",")]
+            n_vals = [float(x) for x in cfg.cylinder_axis.split(",")]
+            
+            c_vec = torch.tensor(c_vals).float()
+            n_vec = torch.tensor(n_vals).float()
+            radius = float(cfg.cylinder_radius)
+
+            # Normalize vector just in case
+            n_vec = n_vec / torch.norm(n_vec)
+
+            if cfg.normalize_world_space:
+                # Transform Center: (C + T) * s
+                transform_mat = torch.tensor(self.parser.transform).float() # [4, 4]
+
+                c_hom = torch.cat([torch.tensor(c_vec), torch.tensor([1.0])])
+
+                c_vec_trans = (transform_mat @ c_hom)[:3] # Apply matrix and drop w
+                
+                # Apply rot to axis vector (no translation)
+                rot_mat = transform_mat[:3, :3] 
+                n_vec_trans = rot_mat @ torch.tensor(n_vec)
+
+                # transform the radius by the scale factor only
+                current_scale = torch.norm(transform_mat[:3, 0])
+                radius_trans = radius * current_scale
+                
+                print(f"[Cyl] World Center: {c_vec}")
+                print(f"[Cyl] Norm  Center: {c_vec_trans.numpy()}")
+                print(f"[Cyl] Norm  Axis:   {n_vec_trans.numpy()}")
+                
+                # Assign to variables
+                self.cyl_center = c_vec_trans.to(self.device)
+                self.cyl_axis = n_vec_trans.to(self.device)
+                self.cyl_radius = radius_trans
+
+            else:
+                self.cyl_center = torch.tensor(c_vec).float().to(self.device)
+                self.cyl_axis = torch.tensor(n_vec).float().to(self.device)
+                self.cyl_radius = radius
+
+            print(f"Cylinder Pruning Active: r={self.cyl_radius:.4f}")
+        
+        # --------------------------------------------------------------------------
+
         self.trainset = Dataset(
             self.parser,
             split="train",
@@ -479,6 +576,175 @@ class Runner:
                 output_dir=Path(cfg.result_dir),
                 mode="training",
             )
+
+    # ===============================================================================
+    # ============================= Pruning functions ===============================
+    # ===============================================================================
+    def _prune_cylinder(self, step):
+        if self.cyl_center is None:
+            return
+
+        means = self.splats["means"] # [N, 3]
+        
+        # Math: Distance from point P to line (C, N)
+        # Vector from Center to Point
+        diff = means - self.cyl_center # [N, 3]
+        
+        # Project diff onto the Axis Normal
+        # (diff . axis)
+        # We need dimensions to match: [N, 3] * [1, 3] -> sum -> [N, 1]
+        projections = (diff * self.cyl_axis).sum(dim=1, keepdim=True)
+        
+        # The component of the vector parallel to the axis
+        parallel_component = projections * self.cyl_axis # [N, 3]
+        
+        # The perpendicular component (radial vector)
+        radial_vec = diff - parallel_component # [N, 3]
+        
+        # Squared distance from axis (avoid sqrt for speed where possible, but we have radius)
+        # dist_sq = (radial_vec ** 2).sum(dim=1)
+        # mask = dist_sq <= (self.cyl_radius ** 2)
+        
+        # Or simply Euclidean norm
+        dists = torch.norm(radial_vec, dim=1)
+        
+        # Create mask
+        inside_mask = dists <= self.cyl_radius
+
+        if inside_mask.all():
+            return
+
+
+        # --- DEBUG: Print Stats ---
+        """ if step % 100 == 0:
+            print(f"\n[BOUNDS DEBUG Step {step}]")
+            print(f"  > Cylinder Center (Internal): {self.cyl_center.cpu().numpy()}")
+            print(f"  > Cylinder Radius (Internal): {self.cyl_radius}")
+            print(f"  > Model Means Min: {means.min(dim=0)[0].detach().cpu().numpy()}")
+            print(f"  > Model Means Max: {means.max(dim=0)[0].detach().cpu().numpy()}")
+            print(f"  > Max Dist from Axis found: {dists.max().item():.4f}")
+            print(f"  > Points to prune: {(~inside_mask).sum().item()} / {len(means)}")
+
+        # --- DEBUG: Visual Paint ---
+
+        if (~inside_mask).sum() > 0:
+            # Get indices of points outside
+            outsiders = ~inside_mask
+            
+            # Reset SH to zero (removes view dependence)
+            self.splats["shN"].data[outsiders] = 0.0
+            
+            # Set Base Color (SH0) to high value on first channel (Red-ish)
+            # 3DGS usually stores SH. 
+            # A raw value of 5.0 in the first channel usually results in bright red/pink after sigmoid
+            red_sh = torch.zeros_like(self.splats["sh0"][outsiders])
+            red_sh[:, 0, 0] = 5.0 # R
+            red_sh[:, 0, 1] = -5.0 # G
+            red_sh[:, 0, 2] = -5.0 # B
+            
+            self.splats["sh0"].data[outsiders] = red_sh """
+
+        # reuse the logic from the previous answer to safely prune
+        # self._perform_pruning(inside_mask)
+
+    def _perform_pruning(self, mask):
+        # ... (Same logic as the previous _prune_points function) ...
+        # 1. Update Strategy State
+        for k, v in self.strategy_state.items():
+            """ if isinstance(v, torch.Tensor):
+                print(f"Pruning strategy state '{k}' from shape {v.shape} to ", end="") """
+            if isinstance(v, torch.Tensor) and v.shape.numel() > 1 and v.shape[0] == mask.shape[0]:
+                self.strategy_state[k] = v[mask]
+
+        # 2. Update Parameters
+        for name, param in self.splats.items():
+            optimizer = self.optimizers[name]
+            # Handle Optimizer State
+            if param in optimizer.state:
+                old_state = optimizer.state[param]
+                new_state = {}
+                for k, v in old_state.items():
+                    if isinstance(v, torch.Tensor) and v.shape.numel() > 1 and v.shape[0] == mask.shape[0]:
+                        new_state[k] = v[mask]
+                    else:
+                        new_state[k] = v
+                del optimizer.state[param]
+            else:
+                new_state = None
+
+            # Create new param
+            new_param = torch.nn.Parameter(param[mask])
+            self.splats[name] = new_param
+            optimizer.param_groups[0]["params"] = [new_param]
+            if new_state:
+                optimizer.state[new_param] = new_state
+        
+        torch.cuda.empty_cache()
+
+    def _prune_points_outside_bounds(self, step):
+        if self.prune_bounds_min is None:
+            return
+
+        means = self.splats["means"]
+        # Create a boolean mask (True = Keep, False = Remove)
+        # Check if points are within the box
+        inside_mask = (means >= self.prune_bounds_min).all(dim=1) & \
+                      (means <= self.prune_bounds_max).all(dim=1)
+
+        # Optimization: Don't do anything if no points need removing
+        if inside_mask.all():
+            return
+
+        n_pruned = (~inside_mask).sum().item()
+        # Optional: Print periodically so you know it's working
+        # if n_pruned > 0:
+        #     print(f"Step {step}: Pruning {n_pruned} points outside bounds.")
+
+        # 1. Update Strategy State (Densification buffers)
+        # We must do this BEFORE changing splats, as checks usually rely on current shapes
+        for k, v in self.strategy_state.items():
+            if isinstance(v, torch.Tensor) and v.shape[0] == means.shape[0]:
+                self.strategy_state[k] = v[inside_mask]
+
+        # 2. Update Model Parameters and Optimizers
+        # We iterate over every parameter (means, scales, sh0, etc.)
+        for name, param in self.splats.items():
+            optimizer = self.optimizers[name]
+            
+            # A. Remove from Optimizer State (Momentum history)
+            # The optimizer state is a dict keyed by the parameter object
+            if param in optimizer.state:
+                old_state = optimizer.state[param]
+                new_state = {}
+                for k, v in old_state.items():
+                    if isinstance(v, torch.Tensor) and v.shape[0] == means.shape[0]:
+                        new_state[k] = v[inside_mask]
+                    else:
+                        new_state[k] = v # Keep scalars (like 'step')
+                
+                # Clean up old state
+                del optimizer.state[param]
+            else:
+                new_state = None
+
+            # B. Create New Parameter
+            # We must create a new nn.Parameter to replace the old one
+            new_param = torch.nn.Parameter(param[inside_mask])
+            
+            # C. Update the Model Dict
+            self.splats[name] = new_param
+            
+            # D. Re-hook the Optimizer
+            # Point the optimizer to the new parameter object
+            optimizer.param_groups[0]["params"] = [new_param]
+            if new_state is not None:
+                optimizer.state[new_param] = new_state
+
+        # Clean up memory
+        torch.cuda.empty_cache()
+
+    # ===============================================================================
+    # ===============================================================================
 
     def rasterize_splats(
         self,
@@ -811,7 +1077,7 @@ class Runner:
                     opacities=opacities,
                     sh0=sh0,
                     shN=shN,
-                    format="ply",
+                    format=cfg.ply_format,
                     save_to=f"{self.ply_dir}/point_cloud_{step}.ply",
                 )
 
@@ -880,6 +1146,12 @@ class Runner:
                 )
             else:
                 assert_never(self.cfg.strategy)
+            
+            # -------------------------------------------------------------
+            if step > 0 and step % cfg.bounds_check_interval == 0:
+                if self.cyl_center is not None:
+                    self._prune_cylinder(step)
+            # --------------------------------------------------------------
 
             # eval the full set
             if step in [i - 1 for i in cfg.eval_steps]:
@@ -1208,7 +1480,7 @@ if __name__ == "__main__":
         "default": (
             "Gaussian splatting training using densification heuristics from the original paper.",
             Config(
-                strategy=DefaultStrategy(verbose=True),
+                strategy=DefaultStrategy(verbose=True, absgrad=True, grow_grad2d=0.0008),
             ),
         ),
         "mcmc": (

@@ -1,0 +1,28 @@
+services:
+  gsplat:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    image: gsplat:dev
+    shm_size: '24gb'  # Increase this value as needed
+    container_name: gsplat-dev
+    volumes:
+      - ..:/gsplat
+      - /data/autarc:/data:cached
+    working_dir: /gsplat
+    tty: true
+    stdin_open: true
+    environment:
+      PYTHONUNBUFFERED: 1
+    ports:
+      - "7777:7777"
+    # Uncomment for NVIDIA GPU support (Docker >= 19.03)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+              count: all
+              driver: nvidia
+    # Or (older syntax):
+    # runtime: nvidia
