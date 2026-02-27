@@ -1,3 +1,10 @@
+# Additions
+
+## Input 
+As a datadir use the `mvs_workspace` of the output of [classical pipeline](https://github.com/Driva96/hloc_autarc.git). It is already geofenced.
+
+Input `cylinder_center`, `cylinder_axis` and `cylinder_radius` can be found in `trainer_cylinder_args.txt` inside the `mvs_workspace`.  
+
 # gsplat
 
 [![Core Tests.](https://github.com/nerfstudio-project/gsplat/actions/workflows/core_tests.yml/badge.svg?branch=main)](https://github.com/nerfstudio-project/gsplat/actions/workflows/core_tests.yml)
