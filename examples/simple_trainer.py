@@ -54,6 +54,9 @@ class Config:
 
     # Path to the Mip-NeRF 360 dataset
     data_dir: str = "data/360_v2/garden"
+    # Path to sparse dir 
+    sparse_dir: Optional[str] = None
+
     # Downsample factor for the dataset
     data_factor: int = 4
     # Directory to save results
@@ -72,7 +75,7 @@ class Config:
     load_exposure: bool = True
 
     # Port for the viewer server
-    port: int = 8080
+    port: int = 7777
 
     # Batch size for training. Learning rates are scaled automatically
     batch_size: int = 1
@@ -375,6 +378,7 @@ class Runner:
             normalize=cfg.normalize_world_space,
             test_every=cfg.test_every,
             load_exposure=cfg.load_exposure,
+            sparse_dir=cfg.sparse_dir if hasattr(cfg, "sparse_dir") else None,
         )
 
         # --------------------------------------------------------------------------

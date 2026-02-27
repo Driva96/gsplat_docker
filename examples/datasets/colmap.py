@@ -65,6 +65,7 @@ class Parser:
         normalize: bool = False,
         test_every: int = 8,
         load_exposure: bool = False,
+        sparse_dir: Optional[str] = None,
     ):
         self.data_dir = data_dir
         self.factor = factor
@@ -75,6 +76,8 @@ class Parser:
         colmap_dir = os.path.join(data_dir, "sparse/0/")
         if not os.path.exists(colmap_dir):
             colmap_dir = os.path.join(data_dir, "sparse")
+        if not os.path.exists(colmap_dir) and sparse_dir is not None:
+            colmap_dir = os.path.join(data_dir, sparse_dir)
         assert os.path.exists(
             colmap_dir
         ), f"COLMAP directory {colmap_dir} does not exist."
