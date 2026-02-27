@@ -1,5 +1,10 @@
 # Additions
 
+## Usage
+
+Use the `simple_trainer.ipnyb` instance to start a trainer. A websocket will be created. Make sure you expose the port from the docker image to the outside. 
+You may then forward tha remote port locally on your machine to see the trainers output build live: `ssh -L [local_port]:[remote_host]:[remote_port] [user]@[remote_server]`
+
 ## Input 
 As a datadir use the `mvs_workspace` of the output of [classical pipeline](https://github.com/Driva96/hloc_autarc.git). It is already geofenced.
 
